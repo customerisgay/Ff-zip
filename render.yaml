@@ -1,0 +1,113 @@
+# =============================================================================
+#  One blueprint -> three services, all wired to each other automatically.
+#
+#    ff-source : the Free Fire data source (Laravel/OB55, built from ./source)
+#    ff-api    : the public key-protected API
+#    ff-bot    : the Telegram bot (tournaments, lookup, API-key generator)
+#    ff-db     : managed Postgres shared by the bot and the API
+#
+#  LOOKUP_URL and API_PUBLIC_URL are filled in by Render itself via
+#  `fromService: property: host`. Nothing to copy, nothing to guess.
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  # 1) Data source — talks to Garena. Deploy it from this repo, no code needed.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ff-source
+    runtime: docker
+    plan: free
+    dockerfilePath: ./source/Dockerfile
+    dockerContext: ./source
+    healthCheckPath: /api/free-fire/v1/health
+    envVars:
+      # Copy these two out of .env in this repo.
+      - key: FREEFIRE_DEFAULT_UID
+        sync: false
+      - key: FREEFIRE_DEFAULT_PASSWORD
+        sync: false
+      - key: FREEFIRE_PROTOCOL
+        value: OB55
+      - key: FREEFIRE_DEFAULT_REGION
+        value: IND
+      - key: FREEFIRE_ENABLED
+        value: "true"
+      - key: FREEFIRE_ROUTES_ENABLED
+        value: "true"
+      - key: FREEFIRE_MEDIA_ENABLED
+        value: "true"
+
+  # ---------------------------------------------------------------------------
+  # 2) Public API — key-protected JSON + images
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ff-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ff-db
+          property: connectionString
+      # Render injects just the hostname (ff-source.onrender.com); dbcore
+      # normalises it into https://…/api/free-fire/v1/players/{uid}?region={region}
+      - key: LOOKUP_URL
+        fromService:
+          type: web
+          name: ff-source
+          property: host
+      - key: DEFAULT_REGION
+        value: IND
+      - key: API_BRAND
+        value: Bomber Janta Party Free Fire API
+      - key: API_OWNER
+        value: "@bomberjantaparty"
+
+  # ---------------------------------------------------------------------------
+  # 3) Telegram bot
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: ff-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /
+    envVars:
+      # The only value you must type in.
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        value: 8581890404,8725461956
+      - key: FORCE_JOIN_CHAT
+        value: "@bomberjantaparty"
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ff-db
+          property: connectionString
+      - key: LOOKUP_URL
+        fromService:
+          type: web
+          name: ff-source
+          property: host
+      - key: DEFAULT_REGION
+        value: IND
+      # Used to print the "test this key" link for admins.
+      - key: API_PUBLIC_URL
+        fromService:
+          type: web
+          name: ff-api
+          property: host
+
+databases:
+  - name: ff-db
+    plan: free
+    databaseName: ffdb
+    user: ffbot
